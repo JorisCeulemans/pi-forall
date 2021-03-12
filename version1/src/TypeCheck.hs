@@ -48,8 +48,9 @@ inferType t = tcTerm t Nothing
 -- elaborated (i.e. already checked to be a good type).
 checkType :: Term -> Type -> TcMonad (Term, Type)
 checkType tm expectedTy = do
-  nf <- whnf expectedTy
-  tcTerm tm (Just nf)
+  --nf <- whnf expectedTy
+  --tcTerm tm (Just nf)
+  tcTerm tm (Just expectedTy)
 
 -- | check a term, producing an elaborated term
 -- where all of the type annotations have been filled in
@@ -123,30 +124,60 @@ tcTerm (TyUnit) Nothing = return (TyUnit, Type)
 
 tcTerm (LitUnit) Nothing = return (LitUnit, TyUnit)
 
-tcTerm (TyBool) Nothing = err [DS "unimplemented"]
+tcTerm (TyBool) Nothing = return (TyBool, Type)
   
-tcTerm (LitBool b) Nothing = err [DS "unimplemented"]
+tcTerm (LitBool b) Nothing = return (LitBool b, TyBool)
   
-tcTerm t@(If t1 t2 t3 ann1) ann2 = err [DS "unimplemented"]      
+tcTerm t@(If t1 t2 t3 ann1) ann2 = do
+  ann <- matchAnnots2 ann1 ann2
+  (et1, _) <- checkType t1 TyBool
+  (et2, ty) <- tcTerm t2 ann
+  (et3, _ ) <- checkType t3 ty
+  return (If et1 et2 et3 $ Annot (Just ty), ty)
   
-tcTerm (Let bnd) ann =   err [DS "unimplemented"]        
-  
-             
-           
-  
-  
-    
+tcTerm (Let bnd) ann = do
+  ((x, unembed -> a), b) <- unbind bnd
+  (ea, tyA) <- inferType a
+  (eb, tyB) <- extendCtx (Sig x tyA) $ tcTerm b ann
+  etyB <- tcType tyB
+  return (Let $ bind (x, embed ea) eb, etyB)
       
-
-    
-tcTerm t@(Sigma bnd) Nothing = err [DS "unimplemented"]
+tcTerm t@(Sigma bnd) Nothing = do
+  ((x, unembed -> tyA), tyB) <- unbind bnd
+  (etyA, _) <- checkType tyA Type
+  (etyB, _) <- extendCtx (Sig x etyA) $ checkType tyB Type
+  return (Sigma (bind (x, embed etyA) tyB), Type)
   
-tcTerm t@(Prod a b ann1) ann2 = err [DS "unimplemented"]
-        
-tcTerm t@(Pcase p bnd ann1) ann2 = err [DS "unimplemented"]
+tcTerm t@(Prod a b ann1) ann2 = do
+  expectedTy <- matchAnnots t ann1 ann2
+  case expectedTy of
+    Sigma bnd -> do
+      ((x, unembed -> tyA), tyB) <- unbind bnd
+      (ea, etyA) <- checkType a tyA
+      etyB <- tcType tyB
+        -- We first need to validate tyB because in this way some meta-info (like position information)
+        -- is removed. This is necessary e.g. to type check double in Hw1.pi because otherwise
+        -- A with meta-info would be compared to A without meta-info.
+      (eb, _) <- checkType b $ subst x ea etyB
+      let ty = Sigma $ bind (x, embed etyA) etyB
+      return (Prod ea eb (Annot $ Just ty), ty)
+    _ -> err [DS "pair expression has a sigma type, not", DD expectedTy]
+
+tcTerm t@(Pcase p bnd ann1) ann2 = do
+  tyC <- matchAnnots t ann1 ann2
+  (ep, tyP) <- inferType p
+  case tyP of
+    Sigma tyBnd -> do
+      ((z, unembed -> tyA), tyB) <- unbind tyBnd
+      ((x, y), c) <- unbind bnd
+      let tyB' = subst z (Var x) tyB
+      etyC <- tcType tyC
+      (ec, _) <- extendCtxs [Sig x tyA, Sig y tyB'] $ checkType c etyC
+      return (Pcase ep (bind (x, y) ec) (Annot $ Just etyC), etyC)
+    _ -> err [DS "pcase expects a value of a sigma type, instead", DD p, DS "has type", DD tyP]
       
 tcTerm tm (Just ty) = do
-  (atm, ty') <- inferType tm 
+  (atm, ty') <- inferType tm
   unless (aeq ty' ty) $ err [DS "Types don't match", DD ty, DS "and", DD ty']
   return (atm, ty)                     
   
@@ -171,6 +202,17 @@ matchAnnots e (Annot (Just t1)) (Just t2) = do
   at1 <- tcType t1                                          
   equate at1 t2
   return at1
+
+matchAnnots2 :: Annot -> Maybe Type -> TcMonad (Maybe Type)
+matchAnnots2 (Annot Nothing) m           = return m
+matchAnnots2 (Annot (Just t)) Nothing    = do
+  at <- tcType t                                          
+  return $ Just at
+matchAnnots2 (Annot (Just t1)) (Just t2) = do
+  at1 <- tcType t1                                          
+  equate at1 t2
+  return $ Just at1
+
   
 -- | Make sure that the term is a type (i.e. has type 'Type') 
 tcType :: Term -> TcMonad Term
